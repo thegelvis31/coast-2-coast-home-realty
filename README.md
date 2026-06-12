@@ -1,12 +1,12 @@
-# Coast 2 Coast — Lead Funnel: Speed-to-Lead
+# Coast 2 Coast — Lead Funnel: Speed-to-Lead (dev2.0)
 
-This branch adds an **instant first-touch responder** ("speed-to-lead") for new
-buyer leads — the highest-leverage change for moving online-lead conversion from
-~2% toward 4–5%.
+Instant first-touch responder for new website buyer leads — the highest-leverage
+change for moving online-lead conversion from ~2% toward 4–5%.
+
+**Target project:** `c2c-crm-dev` (dev2.0). **Lead table:** `public.buyer_inquiries`
+(your PPC / organic / social funnel). **SMS:** Twilio direct.
 
 ## Why speed-to-lead
-
-Across online real-estate leads (PPC, organic, social, portals), the funnel is:
 
 | Stage | What moves it |
 |---|---|
@@ -16,44 +16,44 @@ Across online real-estate leads (PPC, organic, social, portals), the funnel is:
 | Appointment → Active buyer | pre-approval, buyer agreement |
 | Active → **Closed (the "2%")** | nurture + service |
 
-A typical online lead converts to a closed deal at **1–3%**; top teams hit
-**4–5%+**. The difference is overwhelmingly *contact rate* — and contact rate is
-driven by how fast you reach a brand-new lead. Texting within ~1 minute and
-getting the agent on the phone within 5 is the whole game.
+A typical online lead closes at **1–3%**; top teams hit **4–5%+**. The difference
+is overwhelmingly *contact rate*, driven by how fast you reach a fresh lead.
 
 ## What's here
 
-- `supabase/functions/speed-to-lead/index.ts` — the responder. On a new lead it
+- `supabase/functions/speed-to-lead/index.ts` — on a new `buyer_inquiries` row it
   (1) texts the buyer a warm, compliant first message, and (2) alerts the agent
-  to call within 5 minutes.
-- `supabase/migrations/0001_speed_to_lead_log.sql` — audit + idempotency table.
-  A `UNIQUE(lead_id)` index guarantees a lead can only ever get **one** first
-  touch.
+  to call within 5 minutes. Twilio direct.
+- `supabase/migrations/0001_speed_to_lead_log.sql` — audit + idempotency table
+  (`UNIQUE(inquiry_id)` → a lead can only ever get **one** first touch).
 
-## Safety: it cannot double-message Sierra's leads
+Additive only: no existing tables or functions are modified.
 
-`STL_MODE` controls behaviour and **defaults to the safest setting**:
+## Safety: it cannot double-message
+
+`STL_MODE` controls behaviour, **defaulting to the safest setting**:
 
 | `STL_MODE` | Behaviour |
 |---|---|
 | `dry_run` *(default)* | Sends nothing. Logs exactly what it *would* send. |
-| `test` | Sends only to `STL_TEST_PHONE` (your own cell) so you can feel it. |
+| `test` | Sends only to `STL_TEST_PHONE` (your own cell). |
 | `live` | Sends to the actual lead. |
 
-It also hard-skips any lead that is DNC, opted-out, or already contacted.
+The request body may downgrade to `dry_run`/`test`, but can never escalate to
+`live`. Also hard-skips already-followed-up / opted-out / no-phone leads.
 
-## Going live (deliberate, when ready)
+## Required secrets (dev2.0 Supabase → Edge Functions → Secrets)
 
-1. Decide **one** system owns first touch (Sierra **or** this CRM) so there's no
-   overlap. Easiest no-overlap start: point a single new PPC/social campaign at
-   the CRM and let this own only those leads.
-2. Confirm A2P 10DLC registration on the Twilio sending number.
-3. Set `STL_MODE=test`, invoke on a couple of test leads, watch your phone.
-4. Wire the trigger (DB trigger on `leads` insert, or the lead-intake webhook).
-5. Flip `STL_MODE=live`.
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` — your Twilio account.
+- `TWILIO_FROM` *(optional)* — defaults to `+19413401004`.
+- `STL_MODE` — set to `live` only when you've decided this CRM owns first touch.
+- Optional: `STL_TEST_PHONE`, `STL_AGENT_CELL`, `STL_BOOKING_URL`,
+  `STL_BROKERAGE_NAME`, `STL_AGENT_NAME`.
 
-### Env vars
+## Going live
 
-`STL_MODE`, `STL_TEST_PHONE`, `STL_TEST_EMAIL`, `STL_AGENT_CELL`,
-`STL_TWILIO_FROM`, `STL_BROKERAGE_NAME`, `STL_AGENT_NAME`, plus the existing
-`LOVABLE_API_KEY` / `TWILIO_API_KEY` gateway keys.
+1. Add the Twilio secrets above.
+2. Confirm A2P 10DLC registration on the sending number.
+3. `STL_MODE=test` → fire on a test inquiry, watch your phone.
+4. Wire the trigger (DB trigger / webhook on `buyer_inquiries` insert).
+5. Set `STL_MODE=live`.
