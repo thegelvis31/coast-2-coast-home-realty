@@ -36,9 +36,9 @@ const corsHeaders = {
 // switched on — no new Twilio plumbing required.
 const GATEWAY_URL = "https://connector-gateway.lovable.dev/twilio";
 
-const MODE = (Deno.env.get("STL_MODE") ?? "dry_run").toLowerCase();
-const TEST_PHONE = Deno.env.get("STL_TEST_PHONE") ?? "+19419623177"; // Frank's cell
-const TEST_EMAIL = Deno.env.get("STL_TEST_EMAIL") ?? "";
+const ENV_MODE = (Deno.env.get("STL_MODE") ?? "dry_run").toLowerCase();
+const ENV_TEST_PHONE = Deno.env.get("STL_TEST_PHONE") ?? "+19419623177"; // Frank's cell
+const ENV_TEST_EMAIL = Deno.env.get("STL_TEST_EMAIL") ?? "";
 const AGENT_CELL = Deno.env.get("STL_AGENT_CELL") ?? "+19419623177"; // alert goes here
 const TWILIO_FROM = Deno.env.get("STL_TWILIO_FROM") ?? "+19413401004";
 const BROKERAGE_NAME = Deno.env.get("STL_BROKERAGE_NAME") ?? "Coast 2 Coast Home Realty";
@@ -104,6 +104,52 @@ function agentAlertSms(lead: Record<string, unknown>): string {
   );
 }
 
+// Buyer welcome email — reuses the platform's existing "buyer-follow-up"
+// transactional template (enqueued + dispatched by process-email-queue).
+function buyerEmail(lead: Record<string, unknown>) {
+  const name = firstNameOf(lead);
+  const area = areaPhrase(lead);
+  const subject = area
+    ? `Homes${area} — let's find the right one`
+    : `Let's find you the right home`;
+  const body =
+    `Thanks for reaching out — I'd love to help you find the right home${area}.\n\n` +
+    `I just sent you a quick text too. Whenever you're ready, tell me a little about ` +
+    `what you're looking for (area, price range, must-haves) and I'll put together a ` +
+    `short list of homes that fit.\n\n` +
+    `Would a quick call this week work? Just reply with a good time.\n\n` +
+    `Talk soon,\n${AGENT_NAME}\n${BROKERAGE_NAME}`;
+  return { subject, body, agentName: AGENT_NAME, buyerName: name };
+}
+
+async function sendEmail(recipient: string, lead: Record<string, unknown>, leadId: string) {
+  try {
+    const e = buyerEmail(lead);
+    const SRK = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const res = await fetch(
+      `${Deno.env.get("SUPABASE_URL")}/functions/v1/send-transactional-email`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${SRK}`,
+          apikey: SRK,
+        },
+        body: JSON.stringify({
+          templateName: "buyer-follow-up",
+          recipientEmail: recipient,
+          idempotencyKey: `stl-${leadId}`,
+          templateData: e,
+        }),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, to: recipient, subject: e.subject, error: res.ok ? null : JSON.stringify(data) };
+  } catch (err) {
+    return { ok: false, to: recipient, error: String((err as Error).message ?? err) };
+  }
+}
+
 async function sendSms(to: string, body: string) {
   const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
   const TWILIO_API_KEY = Deno.env.get("TWILIO_API_KEY");
@@ -136,6 +182,14 @@ serve(async (req) => {
     const leadId = body.leadId ?? body.lead_id ?? body.record?.id;
     if (!leadId) throw new Error("leadId required");
 
+    // Resolve mode. The request body may downgrade to dry_run/test for safe
+    // testing, but it can NEVER escalate to "live" — going live requires the
+    // STL_MODE=live env var. This keeps the "no double-message" guarantee.
+    const reqMode = String(body.mode ?? "").toLowerCase();
+    const MODE = reqMode === "test" || reqMode === "dry_run" ? reqMode : ENV_MODE;
+    const TEST_PHONE = body.testPhone ?? ENV_TEST_PHONE;
+    const TEST_EMAIL = body.testEmail ?? ENV_TEST_EMAIL;
+
     const { data: lead, error: leadErr } = await supabase
       .from("leads")
       .select("*")
@@ -161,6 +215,7 @@ serve(async (req) => {
     const buyerTo = normalizePhone(lead.phone);
     const buyerBody = buyerSms(lead);
     const agentBody = agentAlertSms(lead);
+    const emailPreview = buyerEmail(lead);
 
     const plan = {
       mode: MODE,
@@ -170,6 +225,7 @@ serve(async (req) => {
         lead.full_name ||
         null,
       buyer_sms: { to: buyerTo, body: buyerBody },
+      buyer_email: { to: lead.email ?? null, subject: emailPreview.subject, body: emailPreview.body },
       agent_alert: { to: AGENT_CELL, body: agentBody },
       skip_reasons: skipReasons,
     };
@@ -191,21 +247,21 @@ serve(async (req) => {
     // ---- Decide actual recipients based on mode -----------------------------
     let buyerSmsResult: Record<string, unknown> = { ok: null, note: "not_sent" };
     let agentSmsResult: Record<string, unknown> = { ok: null, note: "not_sent" };
+    let buyerEmailResult: Record<string, unknown> = { ok: null, note: "not_sent" };
 
     if (MODE === "dry_run") {
       // Send nothing. The plan above is the deliverable.
     } else if (MODE === "test") {
-      buyerSmsResult = await sendSms(
-        normalizePhone(TEST_PHONE),
-        `[TEST→buyer] ${buyerBody}`,
-      );
-      agentSmsResult = await sendSms(
-        normalizePhone(TEST_PHONE),
-        `[TEST→agent] ${agentBody}`,
-      );
+      const tp = normalizePhone(TEST_PHONE);
+      buyerSmsResult = await sendSms(tp, `[TEST→buyer] ${buyerBody}`);
+      agentSmsResult = await sendSms(tp, `[TEST→agent] ${agentBody}`);
+      if (TEST_EMAIL) buyerEmailResult = await sendEmail(TEST_EMAIL, lead, leadId);
     } else if (MODE === "live") {
       buyerSmsResult = await sendSms(buyerTo, buyerBody);
       agentSmsResult = await sendSms(normalizePhone(AGENT_CELL), agentBody);
+      if (lead.email && !lead.do_not_email) {
+        buyerEmailResult = await sendEmail(lead.email as string, lead, leadId);
+      }
     }
 
     // ---- Persist results ----------------------------------------------------
@@ -214,7 +270,7 @@ serve(async (req) => {
       mode: MODE,
       action: "processed",
       plan,
-      result: { buyer_sms: buyerSmsResult, agent_sms: agentSmsResult },
+      result: { buyer_sms: buyerSmsResult, agent_sms: agentSmsResult, buyer_email: buyerEmailResult },
     });
 
     // Only mark the real lead as contacted when we actually messaged THEM.
@@ -238,7 +294,7 @@ serve(async (req) => {
 
     return new Response(
       JSON.stringify({ status: "ok", mode: MODE, plan, result: {
-        buyer_sms: buyerSmsResult, agent_sms: agentSmsResult,
+        buyer_sms: buyerSmsResult, agent_sms: agentSmsResult, buyer_email: buyerEmailResult,
       } }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
