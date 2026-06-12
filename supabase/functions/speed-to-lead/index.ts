@@ -65,12 +65,31 @@ function propertyPhrase(inq: Record<string, unknown>): string {
   return "";
 }
 
+// The actual listing page URL the lead came from (source_url), with any UTM /
+// query string stripped so the link is clean in a text message.
+function listingUrl(inq: Record<string, unknown>): string {
+  const raw = (inq.source_url as string) ?? "";
+  if (!raw.trim()) return "";
+  try {
+    const u = new URL(raw);
+    return u.origin + u.pathname;
+  } catch {
+    return raw.split("?")[0];
+  }
+}
+
 function buyerSms(inq: Record<string, unknown>): string {
   const name = firstNameOf(inq);
   const prop = propertyPhrase(inq);
-  const opener = prop
-    ? `thanks for your interest in ${prop}`
-    : `thanks for reaching out`;
+  const link = listingUrl(inq);
+  let opener: string;
+  if (prop) {
+    opener = link
+      ? `thanks for your interest in ${prop} (${link})`
+      : `thanks for your interest in ${prop}`;
+  } else {
+    opener = link ? `thanks for reaching out about ${link}` : `thanks for reaching out`;
+  }
   const ask = prop
     ? `Want me to set up a private showing, or send you a few similar homes?`
     : `Are you hoping to tour something soon, or just starting to look?`;
@@ -87,13 +106,15 @@ function agentAlertSms(inq: Record<string, unknown>): string {
     (inq.name as string) || "New lead";
   const phone = normalizePhone(inq.phone as string);
   const prop = propertyPhrase(inq);
+  const link = listingUrl(inq);
   const src = (inq.lead_source as string) || (inq.cta_source as string) || "website";
   const when = inq.preferred_showing_at ? `\n🗓️ wants: ${inq.preferred_showing_at}` : "";
   return (
     `🚨 NEW LEAD — call within 5 min!\n\n` +
     `${name}\n📞 ${inq.phone || "no phone"}\n` +
     (prop ? `🏠 ${prop}\n` : "") +
-    `🔗 source: ${src}` + when + `\n` +
+    (link ? `🔗 ${link}\n` : "") +
+    `📲 source: ${src}` + when + `\n` +
     (phone ? `\nTap to call: tel:${phone}` : "")
   );
 }
